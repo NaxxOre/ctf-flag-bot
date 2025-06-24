@@ -2,8 +2,11 @@ import os
 import logging
 import random
 from datetime import datetime
+
+from flask import Flask, request, abort
 from pymongo import MongoClient
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import Bot, Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,6 +16,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 
 # Optional dotenv support
 try:
@@ -33,6 +37,13 @@ users = db.users
 flags = db.flags
 submissions = db.submissions
 admins = db.admins
+application = ApplicationBuilder().token(TOKEN).build()
+
+
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # e.g. https://<your-render-service>.onrender.com/webhook
+
+bot = Bot(token=TOKEN)
+app = Flask(__name__)
 
 # Conversation states
 (
@@ -382,25 +393,33 @@ def main():
         per_user=True
     )
 
+
     # Add handlers
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('delete', delete_challenge))
-    app.add_handler(CommandHandler('myviewpoints', my_viewpoints))
-    app.add_handler(submit_conv)
-    app.add_handler(addflag_conv)
-    app.add_handler(CommandHandler('cancel', cancel))
-    app.add_handler(CommandHandler('viewchallenges', view_challenges))
-    app.add_handler(CallbackQueryHandler(details_challenge, pattern='^.+$'))
-    app.add_handler(CommandHandler('viewpoints', viewpoints))
-    app.add_handler(CommandHandler('viewusers', viewusers))
-    app.add_handler(CommandHandler('addnewadmins', addnewadmins))
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('delete', delete_challenge))
+    application.add_handler(CommandHandler('myviewpoints', my_viewpoints))
+    application.add_handler(submit_conv)
+    application.add_handler(addflag_conv)
+    application.add_handler(CommandHandler('cancel', cancel))
+    application.add_handler(CommandHandler('viewchallenges', view_challenges))
+    application.add_handler(CallbackQueryHandler(details_challenge, pattern='^.+$'))
+    application.add_handler(CommandHandler('viewpoints', viewpoints))
+    application.add_handler(CommandHandler('viewusers', viewusers))
+    application.add_handler(CommandHandler('addnewadmins', addnewadmins))
 
-    app.add_handler(CommandHandler('viewsubmissions', viewsubmissions))
-    app.add_handler(CommandHandler('leaderboard', leaderboard))
+    application.add_handler(CommandHandler('viewsubmissions', viewsubmissions))
+    application.add_handler(CommandHandler('leaderboard', leaderboard))
 
-    app.run_polling()
-    logger.info("CTF Bot started.")
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    application.create_task(application.process_update(update))
+    return 'OK'
+
+import asyncio
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(application.bot.set_webhook(WEBHOOK_URL))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
