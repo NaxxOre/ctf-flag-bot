@@ -13,6 +13,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 # Optional dotenv support
 try:
     from dotenv import load_dotenv
@@ -53,11 +54,9 @@ logger = logging.getLogger(__name__)
 # GIF URLs (only correct/incorrect)
 GIF_CORRECT = [
     "https://tenor.com/bCCX9.gif",
-   
 ]
 GIF_WRONG = [
     "https://tenor.com/Agkx.gif",
-  
 ]
 
 # Helper functions
@@ -81,14 +80,26 @@ async def get_unsolved_challenges(user_id: int) -> list[str]:
     return [ch for ch in all_chals if ch not in solved]
 
 # Command handlers
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "👋 Welcome to the CTF Bot!\n"
-        "• /submit – Submit flags\n"
-        "• /myviewpoints – Your points\n"
-        "• /help – Help menu\n"
-        "• /cancel – Cancel current operation"
+        "👋 Welcome to Csec CTF flag Bot 👾\n"
+        "🦾This bot is designed to Submit flags for CTF challenges from Csec Cyber_CTF learning Gp\n"
+        "🎟Features\n"
+        "🎗 Flag submission\n"
+         "🎗View Challenges\n"
+         "🎗Earn points\n"
+        "🎗Leaderboard\n"
+        "If you want to share CTF challenges or need help in solving one, you can create a challenge for everyone to think about and try to solve.\n"
+        "Feel free to say something in the Csec Cyber_CTF Training Group to request if you really want to share challenges.\n"
+        "https://t.me/+fFDeRvQtILU5MzZl\n"
+        "Commands for managing challenges\n"
+        "You can typically type just / for the bot to show you the commands.\n"
+        "/help – View all the commands\n"
+         "/submit – Start flag submission\n"
+        "/myviewpoints – View your points\n"
+        "/viewchallenges – List all challenges\n"
+        "/leaderboard – View top users\n"
+        "/cancel – Cancel current operation"
     )
     await update.message.reply_text(text)
 
@@ -97,6 +108,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/submit – Start flag submission\n"
         "/myviewpoints – View your points\n"
         "/viewchallenges – List all challenges\n"
+        "/leaderboard – View top users\n"
         "/addflag – (Admin) Add/update a challenge\n"
         "/addnewadmins <username> – (Admin) Grant admin rights\n"
         "/delete <challenge> – (Admin) Delete a challenge\n"
@@ -154,12 +166,10 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if correct:
         users.update_one({"_id": user.id}, {"$inc": {"points": pts}})
         await update.message.reply_text(f"✅ Correct! You earned {pts} points for {chal}!")
-        gif = random.choice(GIF_CORRECT)
-        await update.message.reply_animation(gif)
+        await update.message.reply_animation(random.choice(GIF_CORRECT))
     else:
         await update.message.reply_text(f"❌ Incorrect for {chal}. Try again!")
-        gif = random.choice(GIF_WRONG)
-        await update.message.reply_animation(gif)
+        await update.message.reply_animation(random.choice(GIF_WRONG))
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,18 +200,49 @@ async def details_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = doc.get('post_link', '')
     await query.edit_message_text(f"*{name}*\nPoints: {pts}\n[Post Link]({link})", parse_mode='Markdown')
 
+# Leaderboard command
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    top_users = list(users.find().sort('points', -1).limit(10))
+    if not top_users:
+        await update.message.reply_text("No users on the leaderboard yet.")
+        return
+
+    lines = ["🏅 *Leaderboard* 🏅\n"]
+    for rank, u in enumerate(top_users, start=1):
+        username = u.get('username', f"<{u['_id']}>")
+        pts = u.get('points', 0)
+        lines.append(f"{rank}. @{username} — {pts} pts")
+
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
 # Admin commands
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # Log who is calling and with what args
+    logger.info(f"[addnewadmins] @{user.username} args={context.args}")
+
+    # 1) Authorization check
     if not is_admin(user.username):
-        await update.message.reply_text("❗ You are not authorized.")
+        await update.message.reply_text(
+            f"❗ @{user.username}, you are not authorized to add admins."
+        )
         return
-    if not context.args or len(context.args) != 1:
-        await update.message.reply_text("Usage: /addnewadmins <username>")
+
+    # 2) Argument check
+    if len(context.args) != 1:
+        await update.message.reply_text("❗ Usage: /addnewadmins <username>")
         return
+
+    # 3) Perform the upgrade
     new_admin = context.args[0].lstrip('@')
-    admins.update_one({"username": new_admin}, {"$set": {"username": new_admin}}, upsert=True)
+    admins.update_one(
+        {"username": new_admin},
+        {"$set": {"username": new_admin}},
+        upsert=True
+    )
+
     await update.message.reply_text(f"✅ @{new_admin} is now an admin.")
+
 
 async def addflag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -239,7 +280,7 @@ async def af_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Challenge '{name}' added/updated with {pts} points.")
     return ConversationHandler.END
 
-async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_challenge(update:	Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
         await update.message.reply_text("❗ You are not authorized.")
@@ -253,11 +294,8 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❗ Challenge '{name}' does not exist.")
         return
     pts = doc.get('points', 0)
-    # subtract points from users who solved it
-    solved = submissions.find({"challenge": name, "correct": True})
-    for s in solved:
+    for s in submissions.find({"challenge": name, "correct": True}):
         users.update_one({"_id": s['user_id']}, {"$inc": {"points": -pts}})
-    # remove submissions and flag
     submissions.delete_many({"challenge": name})
     flags.delete_one({"_id": name})
     await update.message.reply_text(f"✅ Challenge '{name}' and all related data deleted.")
@@ -295,7 +333,6 @@ async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📝 Submissions:\n" + "\n".join(lines))
 
 # Register handlers and start bot
-
 def init_commands(app):
     async def on_startup(application):
         commands = [
@@ -304,6 +341,7 @@ def init_commands(app):
             BotCommand('submit', 'Submit a flag'),
             BotCommand('myviewpoints', 'View your points'),
             BotCommand('viewchallenges', 'List challenges'),
+            BotCommand('leaderboard', 'View top users'),
             BotCommand('addflag', 'Add/update a challenge'),
             BotCommand('addnewadmins', 'Grant admin rights'),
             BotCommand('delete', 'Delete a challenge'),
@@ -315,7 +353,6 @@ def init_commands(app):
         await application.bot.set_my_commands(commands)
     return on_startup
 
-
 def main():
     on_startup = init_commands(None)
     app = (ApplicationBuilder()
@@ -323,6 +360,7 @@ def main():
            .post_init(on_startup)
            .build())
 
+    # Conversation handlers
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler('submit', submit_start)],
         states={
@@ -344,6 +382,7 @@ def main():
         per_user=True
     )
 
+    # Add handlers
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('delete', delete_challenge))
@@ -355,7 +394,10 @@ def main():
     app.add_handler(CallbackQueryHandler(details_challenge, pattern='^.+$'))
     app.add_handler(CommandHandler('viewpoints', viewpoints))
     app.add_handler(CommandHandler('viewusers', viewusers))
+    app.add_handler(CommandHandler('addnewadmins', addnewadmins))
+
     app.add_handler(CommandHandler('viewsubmissions', viewsubmissions))
+    app.add_handler(CommandHandler('leaderboard', leaderboard))
 
     app.run_polling()
     logger.info("CTF Bot started.")
