@@ -1,11 +1,10 @@
 import os
 import logging
 import random
+import asyncio
 from datetime import datetime
 
-from flask import Flask, request, abort
 from pymongo import MongoClient
-
 from telegram import Bot, Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,7 +15,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
+from telegram.error import TimedOut
 
 # Optional dotenv support
 try:
@@ -29,6 +28,7 @@ except ImportError:
 TOKEN = os.getenv('TOKEN')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')
 MONGO_URI = os.getenv('MONGO_URI')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # e.g. https://<your-render-service>.onrender.com/webhook
 
 # MongoDB setup
 client = MongoClient(MONGO_URI)
@@ -37,23 +37,9 @@ users = db.users
 flags = db.flags
 submissions = db.submissions
 admins = db.admins
-application = ApplicationBuilder().token(TOKEN).build()
-
-
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # e.g. https://<your-render-service>.onrender.com/webhook
-
-bot = Bot(token=TOKEN)
-app = Flask(__name__)
 
 # Conversation states
-(
-    SELECT_CHALLENGE,
-    WAIT_FLAG,
-    AF_NAME,
-    AF_POINTS,
-    AF_LINK,
-    AF_FLAG
-) = range(6)
+SELECT_CHALLENGE, WAIT_FLAG, AF_NAME, AF_POINTS, AF_LINK, AF_FLAG = range(6)
 
 # Logging
 logging.basicConfig(
@@ -71,7 +57,6 @@ GIF_WRONG = [
 ]
 
 # Helper functions
-
 def is_admin(username: str) -> bool:
     return (
         username == ADMIN_USERNAME
@@ -97,8 +82,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🦾This bot is designed to Submit flags for CTF challenges from Csec Cyber_CTF learning Gp\n"
         "🎟Features\n"
         "🎗 Flag submission\n"
-         "🎗View Challenges\n"
-         "🎗Earn points\n"
+        "🎗View Challenges\n"
+        "🎗Earn points\n"
         "🎗Leaderboard\n"
         "If you want to share CTF challenges or need help in solving one, you can create a challenge for everyone to think about and try to solve.\n"
         "Feel free to say something in the Csec Cyber_CTF Training Group to request if you really want to share challenges.\n"
@@ -106,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands for managing challenges\n"
         "You can typically type just / for the bot to show you the commands.\n"
         "/help – View all the commands\n"
-         "/submit – Start flag submission\n"
+        "/submit – Start flag submission\n"
         "/myviewpoints – View your points\n"
         "/viewchallenges – List all challenges\n"
         "/leaderboard – View top users\n"
@@ -211,49 +196,35 @@ async def details_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = doc.get('post_link', '')
     await query.edit_message_text(f"*{name}*\nPoints: {pts}\n[Post Link]({link})", parse_mode='Markdown')
 
-# Leaderboard command
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top_users = list(users.find().sort('points', -1).limit(10))
     if not top_users:
         await update.message.reply_text("No users on the leaderboard yet.")
         return
-
     lines = ["🏅 *Leaderboard* 🏅\n"]
     for rank, u in enumerate(top_users, start=1):
         username = u.get('username', f"<{u['_id']}>")
         pts = u.get('points', 0)
         lines.append(f"{rank}. @{username} — {pts} pts")
-
     await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
 # Admin commands
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # Log who is calling and with what args
     logger.info(f"[addnewadmins] @{user.username} args={context.args}")
-
-    # 1) Authorization check
     if not is_admin(user.username):
-        await update.message.reply_text(
-            f"❗ @{user.username}, you are not authorized to add admins."
-        )
+        await update.message.reply_text(f"❗ @{user.username}, you are not authorized to add admins.")
         return
-
-    # 2) Argument check
     if len(context.args) != 1:
         await update.message.reply_text("❗ Usage: /addnewadmins <username>")
         return
-
-    # 3) Perform the upgrade
     new_admin = context.args[0].lstrip('@')
     admins.update_one(
         {"username": new_admin},
         {"$set": {"username": new_admin}},
         upsert=True
     )
-
     await update.message.reply_text(f"✅ @{new_admin} is now an admin.")
-
 
 async def addflag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -291,7 +262,7 @@ async def af_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Challenge '{name}' added/updated with {pts} points.")
     return ConversationHandler.END
 
-async def delete_challenge(update:	Update, context: ContextTypes.DEFAULT_TYPE):
+async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
         await update.message.reply_text("❗ You are not authorized.")
@@ -343,7 +314,7 @@ async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
     await update.message.reply_text("📝 Submissions:\n" + "\n".join(lines))
 
-# Register handlers and start bot
+# Startup: retry setting commands
 def init_commands(app):
     async def on_startup(application):
         commands = [
@@ -351,7 +322,7 @@ def init_commands(app):
             BotCommand('help', 'Show help'),
             BotCommand('submit', 'Submit a flag'),
             BotCommand('myviewpoints', 'View your points'),
-            BotCommand('viewchallenges', 'List challenges'),
+            BotCommand('viewchallenges', 'List all challenges'),
             BotCommand('leaderboard', 'View top users'),
             BotCommand('addflag', 'Add/update a challenge'),
             BotCommand('addnewadmins', 'Grant admin rights'),
@@ -361,17 +332,43 @@ def init_commands(app):
             BotCommand('viewsubmissions', 'View submissions log'),
             BotCommand('cancel', 'Cancel current operation')
         ]
-        await application.bot.set_my_commands(commands)
+        for attempt in range(3):
+            try:
+                await application.bot.set_my_commands(commands)
+                return
+            except TimedOut:
+                logger.warning(f"set_my_commands timed out, retry {attempt+1}/3")
+                await asyncio.sleep(2)
+        logger.error("Failed to set bot commands after 3 attempts")
     return on_startup
 
 def main():
-    on_startup = init_commands(None)
-    app = (ApplicationBuilder()
-           .token(TOKEN)
-           .post_init(on_startup)
-           .build())
+    webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(init_commands(None))
+        .build()
+    )
 
-    # Conversation handlers
+    # Register handlers
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('help', help_command))
+    app.add_handler(CommandHandler('submit', submit_start))
+    app.add_handler(CommandHandler('myviewpoints', my_viewpoints))
+    app.add_handler(CommandHandler('viewchallenges', view_challenges))
+    app.add_handler(CommandHandler('leaderboard', leaderboard))
+    app.add_handler(CommandHandler('addnewadmins', addnewadmins))
+    app.add_handler(CommandHandler('delete', delete_challenge))
+    app.add_handler(CommandHandler('viewpoints', viewpoints))
+    app.add_handler(CommandHandler('viewusers', viewusers))
+    app.add_handler(CommandHandler('viewsubmissions', viewsubmissions))
+
+    app.add_handler(CallbackQueryHandler(select_challenge, pattern='^.+$'))
+    app.add_handler(CallbackQueryHandler(details_challenge, pattern='^.+$'))
+
+
+    
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler('submit', submit_start)],
         states={
@@ -387,39 +384,25 @@ def main():
             AF_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_name)],
             AF_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_points)],
             AF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_link)],
-            AF_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_flag)],
+            AF_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_flag)]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         per_user=True
     )
+    app.add_handler(submit_conv)
+    app.add_handler(addflag_conv)
 
+    # Start webhook or polling
+    if WEBHOOK_URL:
+        
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 5000)),
+            url_path="webhook",
+            webhook_url=WEBHOOK_URL
+        )
+    else:
+        app.run_polling()
 
-    # Add handlers
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('delete', delete_challenge))
-    application.add_handler(CommandHandler('myviewpoints', my_viewpoints))
-    application.add_handler(submit_conv)
-    application.add_handler(addflag_conv)
-    application.add_handler(CommandHandler('cancel', cancel))
-    application.add_handler(CommandHandler('viewchallenges', view_challenges))
-    application.add_handler(CallbackQueryHandler(details_challenge, pattern='^.+$'))
-    application.add_handler(CommandHandler('viewpoints', viewpoints))
-    application.add_handler(CommandHandler('viewusers', viewusers))
-    application.add_handler(CommandHandler('addnewadmins', addnewadmins))
-
-    application.add_handler(CommandHandler('viewsubmissions', viewsubmissions))
-    application.add_handler(CommandHandler('leaderboard', leaderboard))
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-    asyncio.run_coroutine_threadsafe(application.process_update(update), application.loop)
-    return 'OK'
-
-import asyncio
-
-if __name__ == '__main__':
-    asyncio.run(application.bot.set_webhook(WEBHOOK_URL))
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+if __name__ == "__main__":
+    main()
