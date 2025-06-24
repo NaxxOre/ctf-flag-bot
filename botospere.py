@@ -168,7 +168,7 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Correct! You earned {pts} points for {chal}!")
         await update.message.reply_animation(random.choice(GIF_CORRECT))
     else:
-        await update.message.reply_text(f"❌ Incorrect for {chal}. Try again!")
+        await update.message.reply_text(f"❌ Incorrect for {chal}. Try again! /submit")
         await update.message.reply_animation(random.choice(GIF_WRONG))
     return ConversationHandler.END
 
