@@ -415,7 +415,7 @@ def main():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    application.create_task(application.process_update(update))
+    asyncio.run_coroutine_threadsafe(application.process_update(update), application.loop)
     return 'OK'
 
 import asyncio
