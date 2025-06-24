@@ -298,15 +298,17 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.username):
         await update.message.reply_text("❗ Unauthorized.")
         return
-    if len(context.args) != 1:
+    if not context.args:
         await update.message.reply_text("Usage: /delete <challenge>")
         return
-    name = context.args[0]
+    # join all parts into the full challenge name
+    name = " ".join(context.args).strip()
     doc = flags.find_one({"_id": name})
     if not doc:
         await update.message.reply_text(f"❗ Challenge '{name}' does not exist.")
         return
     pts = doc.get("points", 0)
+    # remove submissions and deduct points
     for s in submissions.find({"challenge": name, "correct": True}):
         users.update_one({"_id": s["user_id"]}, {"$inc": {"points": -pts}})
     submissions.delete_many({"challenge": name})
@@ -401,7 +403,7 @@ def main():
 
     # Separate callback handlers
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
-    
+
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler("submit", submit_start)],
         states={
@@ -433,6 +435,7 @@ def main():
     # Error handler
     async def error_handler(update, context):
         logger.error("❌ Exception in handler:", exc_info=context.error)
+
     app.add_error_handler(error_handler)
 
     # Start webhook or polling
