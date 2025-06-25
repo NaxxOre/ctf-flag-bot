@@ -71,14 +71,14 @@ async def get_unsolved_challenges(user_id: int) -> list[str]:
     return [ch for ch in all_chals if ch not in solved]
 
 # Build paginated keyboard
-
 def build_menu(items, page, prefix):
     start = page * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_items = items[start:end]
     keyboard = []
     for item in page_items:
-        keyboard.append([InlineKeyboardButton(item, callback_data=f"{prefix}:{page}:{item}")])
+        # Use a dummy callback for items to prevent unintended navigation
+        keyboard.append([InlineKeyboardButton(item, callback_data=f"{prefix}:noop")])
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{prefix}:{page-1}:nav"))
@@ -225,19 +225,28 @@ async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
     keyboard = build_menu(items, 0, 'lead')
     await update.message.reply_text(
-        "🏅 *Leaderboard* 🏅", parse_mode="Markdown",
+        "🏅 *Leaderboard* 🏅\n\n" + "\n".join(items[0:ITEMS_PER_PAGE]),
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, page_str, _ = query.data.split(':', 2)
-    page = int(page_str)
-    all_users = context.user_data.get('leaderboard_list', [])
-    items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
-    keyboard = build_menu(items, page, 'lead')
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    data = query.data.split(':', 2)
+    if len(data) == 3 and data[2] == 'nav':
+        page = int(data[1])
+        all_users = context.user_data.get('leaderboard_list', [])
+        items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
+        start = page * ITEMS_PER_PAGE
+        end = start + ITEMS_PER_PAGE
+        page_items = items[start:end]
+        keyboard = build_menu(items, page, 'lead')
+        await query.edit_message_text(
+            "🏅 *Leaderboard* 🏅\n\n" + "\n".join(page_items),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 # Registered users with pagination
 async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,7 +255,7 @@ async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ Unauthorized.")
         return
     all_users = list(users.find())
-    context.user_data['users_list']=all_users
+    context.user_data['users_list'] = all_users
     items = [f"{u['_id']}: {u['username']}" for u in all_users]
     keyboard = build_menu(items, 0, 'users')
     await update.message.reply_text("👥 Registered Users:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -325,7 +334,7 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = " ".join(context.args).strip()
     doc = flags.find_one({"_id": name})
     if not doc:
-        await update.message_reply_text(f"❗ Challenge '{name}' does not exist.")
+        await update.message.reply_text(f"❗ Challenge '{name}' does not exist.")
         return
     pts = doc.get("points", 0)
     for s in submissions.find({"challenge": name, "correct": True}):
@@ -337,7 +346,7 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
-        await update.message_reply_text("❗ Unauthorized.")
+        await update.message.reply_text("❗ Unauthorized.")
         return
     rows = submissions.find().sort("timestamp", -1)
     lines = []
@@ -346,7 +355,7 @@ async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname = users.find_one({"_id": r["user_id"]})["username"]
         status = "Correct" if r["correct"] else "Wrong"
         lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
-    await update.message_reply_text("📝 Submissions:\n" + "\n".join(lines))
+    await update.message.reply_text("📝 Submissions:\n" + "\n".join(lines))
 
 # Startup: retry setting commands
 def init_commands(app):
@@ -376,7 +385,6 @@ def init_commands(app):
 
     return on_startup
 
-
 def main():
     app = (
         ApplicationBuilder()
@@ -391,7 +399,7 @@ def main():
     app.add_handler(CommandHandler("myviewpoints", my_viewpoints))
     app.add_handler(CommandHandler("viewchallenges", view_challenges))
     app.add_handler(CommandHandler("leaderboard", leaderboard_start))
-    app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\\d+:(nav|.+)"))
+    app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\\d+:nav$"))
     app.add_handler(CommandHandler("addnewadmins", addnewadmins))
     app.add_handler(CommandHandler("delete", delete_challenge))
     app.add_handler(CommandHandler("viewusers", viewusers_start))
@@ -403,11 +411,15 @@ def main():
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler("submit", submit_start)],
         states={
-            SELECT_CHALLENGE: [CallbackQueryHandler(select_challenge, pattern=r"^submit:.+")],
+            SELECT_CHALLENGE: [
+                CallbackQueryHandler(select_challenge, pattern=r"^submit:.+"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.message.reply_text("Please select a challenge from the buttons above."))
+            ],
             WAIT_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
+        allow_reentry=True,
     )
     addflag_conv = ConversationHandler(
         entry_points=[CommandHandler("addflag", addflag_start)],
