@@ -44,6 +44,7 @@ SELECT_CHALLENGE, WAIT_FLAG, AF_NAME, AF_POINTS, AF_LINK, AF_FLAG = range(6)
 
 # Pagination settings
 ITEMS_PER_PAGE = 10
+SUBMISSIONS_PER_PAGE = 20  # Added for submissions pagination
 
 # Logging
 logging.basicConfig(
@@ -72,10 +73,10 @@ async def get_unsolved_challenges(user_id: int) -> list[str]:
     solved = [s["challenge"] for s in submissions.find({"user_id": user_id, "correct": True})]
     return [ch for ch in all_chals if ch not in solved]
 
-# Build paginated keyboard
-def build_menu(items, page, prefix):
-    start = page * ITEMS_PER_PAGE
-    end = start + ITEMS_PER_PAGE
+# Build paginated keyboard (used for leaderboard, viewusers)
+def build_menu(items, page, prefix, items_per_page=ITEMS_PER_PAGE):
+    start = page * items_per_page
+    end = start + items_per_page
     page_items = items[start:end]
     keyboard = []
     for item in page_items:
@@ -90,6 +91,31 @@ def build_menu(items, page, prefix):
         keyboard.append(nav_buttons)
     logger.info(f"Generated keyboard for {prefix}, page {page}, callback data: {nav_buttons}")
     return keyboard
+
+# Build submissions message with pagination
+def build_submissions_message(submissions_list, page):
+    start = page * SUBMISSIONS_PER_PAGE
+    end = start + SUBMISSIONS_PER_PAGE
+    page_submissions = submissions_list[start:end]
+    lines = []
+    for r in page_submissions:
+        ts = r.get("timestamp", r["_id"].generation_time).strftime("%Y-%m-%d %H:%M:%S")
+        user_doc = users.find_one({"_id": r["user_id"]})
+        uname = user_doc.get("username", "Unknown") if user_doc else "Unknown"
+        status = "Correct" if r["correct"] else "Wrong"
+        lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
+    text = "📝 Submissions:\n" + "\n".join(lines)
+    
+    keyboard = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"submissions:{page-1}:nav"))
+    if end < len(submissions_list):
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"submissions:{page+1}:nav"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    return text, keyboard
 
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +223,9 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     if correct:
         users.update_one(
-            {"_id": user.id},
+            {"_ lipca
+
+id": user.id},
             {
                 "$inc": {"points": pts},
                 "$set": {"last_correct_submission": datetime.utcnow()}
@@ -402,25 +430,39 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flags.delete_one({"_id": name})
     await update.message.reply_text(f"✅ Challenge '{name}' and all related data deleted.")
 
+# Updated viewsubmissions with pagination
 async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
         await update.message.reply_text("❗ Unauthorized.")
         return
-    rows = submissions.find().sort("timestamp", -1)
-    lines = []
-    for r in rows:
-        ts = r.get("timestamp", r["_id"].generation_time)
-        # Fetch user document and handle None case
-        user_doc = users.find_one({"_id": r["user_id"]})
-        if user_doc:
-            uname = user_doc.get("username", "Unknown")
-        else:
-            uname = "Unknown"
-            logger.warning(f"User not found for user_id: {r['user_id']}")
-        status = "Correct" if r["correct"] else "Wrong"
-        lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
-    await update.message.reply_text("📝 Submissions:\n" + "\n".join(lines))
+    
+    all_submissions = list(submissions.find().sort("timestamp", -1))
+    context.user_data['submissions_list'] = all_submissions
+    
+    if not all_submissions:
+        await update.message.reply_text("No submissions yet.")
+        return
+    
+    text, keyboard = build_submissions_message(all_submissions, 0)
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Callback handler for submissions pagination
+async def submissions_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split(':', 2)
+    if len(data) == 3 and data[0] == 'submissions' and data[2] == 'nav':
+        page = int(data[1])
+        all_submissions = context.user_data.get('submissions_list', [])
+        
+        if not all_submissions:
+            await query.edit_message_text("Error: Submissions data not found. Please run /viewsubmissions again.")
+            return
+        
+        text, keyboard = build_submissions_message(all_submissions, page)
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # Startup: retry setting commands
 def init_commands(app):
@@ -470,6 +512,7 @@ def main():
     app.add_handler(CommandHandler("viewusers", viewusers_start))
     app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\d+:(nav|.+)"))
     app.add_handler(CommandHandler("viewsubmissions", viewsubmissions))
+    app.add_handler(CallbackQueryHandler(submissions_page, pattern=r"^submissions:\d+:nav$"))
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
 
     # Conversations спроб
