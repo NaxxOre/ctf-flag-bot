@@ -452,7 +452,7 @@ def main():
     async def error_handler(update, context):
         logger.error("❌ Exception in handler:", exc_info=context.error)
 
-    app.add_error_handler(error_handler)
+    app.add_handler(error_handler)
 
     # Start webhook or polling
     if WEBHOOK_URL:
