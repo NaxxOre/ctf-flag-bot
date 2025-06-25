@@ -194,7 +194,13 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.utcnow(),
     })
     if correct:
-        users.update_one({"_id": user.id}, {"$inc": {"points": pts}})
+        users.update_one(
+            {"_id": user.id},
+            {
+                "$inc": {"points": pts},
+                "$set": {"last_correct_submission": datetime.utcnow()}
+            }
+        )
         await update.message.reply_text(
             f"✅ Correct! You earned {pts} points for {chal}!"
         )
@@ -219,7 +225,8 @@ async def my_viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Leaderboard with pagination
 async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_users = list(users.find().sort("points", -1))
+    # Sort by points descending, then by last_correct_submission ascending
+    all_users = list(users.find().sort([("points", -1), ("last_correct_submission", 1)]))
     if not all_users:
         await update.message.reply_text("No users on the leaderboard yet.")
         return
