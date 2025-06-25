@@ -223,9 +223,7 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     if correct:
         users.update_one(
-            {"_ lipca
-
-id": user.id},
+            {"_id": user.id},  # Fixed the unterminated string literal here
             {
                 "$inc": {"points": pts},
                 "$set": {"last_correct_submission": datetime.utcnow()}
