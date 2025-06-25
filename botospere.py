@@ -3,6 +3,7 @@ import logging
 import random
 import asyncio
 from datetime import datetime
+import html
 
 from pymongo import MongoClient
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -145,7 +146,8 @@ async def details_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pts = doc.get("points", 0)
     link = doc.get("post_link", "")
     await query.edit_message_text(
-        f"*{name}*\nPoints: {pts}\n[Post Link]({link})", parse_mode="Markdown"
+        f"<b>{html.escape(name)}</b>\nPoints: {pts}\n<a href=\"{link}\">Post Link</a>",
+        parse_mode="HTML"
     )
 
 # Submission flow
@@ -169,8 +171,8 @@ async def select_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chal = query.data.split(":", 1)[1]
     context.user_data["challenge"] = chal
     await query.edit_message_text(
-        f"🚩 Submit flag for *{chal}*:\n_Please send only the flag._",
-        parse_mode="Markdown",
+        f"🚩 Submit flag for <b>{html.escape(chal)}</b>:\n<i>Please send only the flag.</i>",
+        parse_mode="HTML",
     )
     return WAIT_FLAG
 
@@ -222,11 +224,11 @@ async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No users on the leaderboard yet.")
         return
     context.user_data['leaderboard_list'] = all_users
-    items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
+    items = [f"{rank+1}. @{html.escape(u['username'])} — {u['points']} pts" for rank, u in enumerate(all_users)]
     keyboard = build_menu(items, 0, 'lead')
     await update.message.reply_text(
-        "🏅 *Leaderboard* 🏅\n\n" + "\n".join(items[0:ITEMS_PER_PAGE]),
-        parse_mode="Markdown",
+        "<b>🏅 Leaderboard 🏅</b>\n\n" + "\n".join(items[0:ITEMS_PER_PAGE]),
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -237,14 +239,14 @@ async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(data) == 3 and data[2] == 'nav':
         page = int(data[1])
         all_users = context.user_data.get('leaderboard_list', [])
-        items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
+        items = [f"{rank+1}. @{html.escape(u['username'])} — {u['points']} pts" for rank, u in enumerate(all_users)]
         start = page * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         keyboard = build_menu(items, page, 'lead')
         await query.edit_message_text(
-            "🏅 *Leaderboard* 🏅\n\n" + "\n".join(page_items),
-            parse_mode="Markdown",
+            "<b>🏅 Leaderboard 🏅</b>\n\n" + "\n".join(page_items),
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -413,9 +415,13 @@ def main():
         states={
             SELECT_CHALLENGE: [
                 CallbackQueryHandler(select_challenge, pattern=r"^submit:.+"),
+                CommandHandler("submit", submit_start),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.message.reply_text("Please select a challenge from the buttons above."))
             ],
-            WAIT_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)],
+            WAIT_FLAG: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag),
+                CommandHandler("submit", submit_start)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
