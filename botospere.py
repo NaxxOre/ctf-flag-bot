@@ -41,6 +41,9 @@ admins = db.admins
 # Conversation states
 SELECT_CHALLENGE, WAIT_FLAG, AF_NAME, AF_POINTS, AF_LINK, AF_FLAG = range(6)
 
+# Pagination settings
+ITEMS_PER_PAGE = 10
+
 # Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -51,11 +54,9 @@ logger = logging.getLogger(__name__)
 GIF_CORRECT = ["https://tenor.com/bCCX9.gif"]
 GIF_WRONG = ["https://tenor.com/Agkx.gif"]
 
-
 # Helper functions
 def is_admin(username: str) -> bool:
     return username == ADMIN_USERNAME or bool(admins.find_one({"username": username}))
-
 
 async def add_user_if_not_exists(user_id: int, username: str):
     users.update_one(
@@ -64,15 +65,28 @@ async def add_user_if_not_exists(user_id: int, username: str):
         upsert=True,
     )
 
-
 async def get_unsolved_challenges(user_id: int) -> list[str]:
     all_chals = [c["_id"] for c in flags.find()]
-    solved = [
-        s["challenge"]
-        for s in submissions.find({"user_id": user_id, "correct": True})
-    ]
+    solved = [s["challenge"] for s in submissions.find({"user_id": user_id, "correct": True})]
     return [ch for ch in all_chals if ch not in solved]
 
+# Build paginated keyboard
+
+def build_menu(items, page, prefix):
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    page_items = items[start:end]
+    keyboard = []
+    for item in page_items:
+        keyboard.append([InlineKeyboardButton(item, callback_data=f"{prefix}:{page}:{item}")])
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{prefix}:{page-1}:nav"))
+    if end < len(items):
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{prefix}:{page+1}:nav"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    return keyboard
 
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,7 +112,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/submit – Start flag submission\n"
@@ -108,12 +121,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/addflag – (Admin) Add/update a challenge\n"
         "/addnewadmins <username> – (Admin) Grant admin rights\n"
         "/delete <challenge> – (Admin) Delete a challenge\n"
-        "/viewpoints – (Admin) View all users' points\n"
         "/viewusers – (Admin) View registered users\n"
         "/viewsubmissions – (Admin) View submissions log\n"
         "/cancel – Cancel current operation"
     )
-
 
 # View challenges → details
 async def view_challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,13 +132,10 @@ async def view_challenges(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("No challenges available.")
         return
-    keyboard = [
-        [InlineKeyboardButton(ch, callback_data=f"detail:{ch}")] for ch in rows
-    ]
+    keyboard = [[InlineKeyboardButton(ch, callback_data=f"detail:{ch}")] for ch in rows]
     await update.message.reply_text(
         "📋 Select a challenge:", reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
 
 async def details_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -140,7 +148,6 @@ async def details_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*{name}*\nPoints: {pts}\n[Post Link]({link})", parse_mode="Markdown"
     )
 
-
 # Submission flow
 async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -149,17 +156,12 @@ async def submit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not unsolved:
         await update.message.reply_text("🎉 All challenges solved!")
         return ConversationHandler.END
-
-    keyboard = [
-        [InlineKeyboardButton(ch, callback_data=f"submit:{ch}")]
-        for ch in unsolved
-    ]
+    keyboard = [[InlineKeyboardButton(ch, callback_data=f"submit:{ch}")] for ch in unsolved]
     await update.message.reply_text(
         "📋 Select a challenge to submit:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return SELECT_CHALLENGE
-
 
 async def select_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -172,7 +174,6 @@ async def select_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_FLAG
 
-
 async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chal = context.user_data.get("challenge")
@@ -181,20 +182,15 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         await update.message.reply_text("❗ Challenge not found.")
         return ConversationHandler.END
-
     correct = flag_text == doc["flag"]
     pts = doc.get("points", 0)
-
-    submissions.insert_one(
-        {
-            "user_id": user.id,
-            "challenge": chal,
-            "submitted_flag": flag_text,
-            "correct": correct,
-            "timestamp": datetime.utcnow(),
-        }
-    )
-
+    submissions.insert_one({
+        "user_id": user.id,
+        "challenge": chal,
+        "submitted_flag": flag_text,
+        "correct": correct,
+        "timestamp": datetime.utcnow(),
+    })
     if correct:
         users.update_one({"_id": user.id}, {"$inc": {"points": pts}})
         await update.message.reply_text(
@@ -206,14 +202,11 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Incorrect for {chal}. Try again with /submit"
         )
         await update.message.reply_animation(random.choice(GIF_WRONG))
-
     return ConversationHandler.END
-
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❎ Operation cancelled.")
     return ConversationHandler.END
-
 
 # Other view commands
 async def my_viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,19 +215,53 @@ async def my_viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pts = doc.get("points", 0)
     await update.message.reply_text(f"👤 @{user.username}, you have {pts} points.")
 
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top_users = list(users.find().sort("points", -1).limit(10))
-    if not top_users:
+# Leaderboard with pagination
+async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    all_users = list(users.find().sort("points", -1))
+    if not all_users:
         await update.message.reply_text("No users on the leaderboard yet.")
         return
-    lines = ["🏅 *Leaderboard* 🏅\n"]
-    for rank, u in enumerate(top_users, start=1):
-        lines.append(f"{rank}. @{u.get('username')} — {u.get('points',0)} pts")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    context.user_data['leaderboard_list'] = all_users
+    items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
+    keyboard = build_menu(items, 0, 'lead')
+    await update.message.reply_text(
+        "🏅 *Leaderboard* 🏅", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
+async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, page_str, _ = query.data.split(':', 2)
+    page = int(page_str)
+    all_users = context.user_data.get('leaderboard_list', [])
+    items = [f"{rank+1}. @{u['username']} — {u['points']} pts" for rank, u in enumerate(all_users)]
+    keyboard = build_menu(items, page, 'lead')
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Admin commands (addnewadmins, addflag, delete, viewpoints, viewusers, viewsubmissions)
+# Registered users with pagination
+async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.username):
+        await update.message.reply_text("❗ Unauthorized.")
+        return
+    all_users = list(users.find())
+    context.user_data['users_list']=all_users
+    items = [f"{u['_id']}: {u['username']}" for u in all_users]
+    keyboard = build_menu(items, 0, 'users')
+    await update.message.reply_text("👥 Registered Users:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def viewusers_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, page_str, _ = query.data.split(':', 2)
+    page = int(page_str)
+    all_users = context.user_data.get('users_list', [])
+    items = [f"{u['_id']}: {u['username']}" for u in all_users]
+    keyboard = build_menu(items, page, 'users')
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Admin commands (addnewadmins, addflag, delete, viewsubmissions)
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
@@ -247,7 +274,6 @@ async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins.update_one({"username": new_admin}, {"$set": {"username": new_admin}}, upsert=True)
     await update.message.reply_text(f"✅ @{new_admin} is now an admin.")
 
-
 async def addflag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
@@ -256,12 +282,10 @@ async def addflag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📝 Enter challenge name:")
     return AF_NAME
 
-
 async def af_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["af_name"] = update.message.text.strip()
     await update.message.reply_text("🎯 Enter points value:")
     return AF_POINTS
-
 
 async def af_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -272,12 +296,10 @@ async def af_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔗 Enter Telegram post link:")
     return AF_LINK
 
-
 async def af_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["af_link"] = update.message.text.strip()
     await update.message.reply_text("🚩 Enter the correct flag string:")
     return AF_FLAG
-
 
 async def af_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = context.user_data["af_name"]
@@ -292,7 +314,6 @@ async def af_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Challenge '{name}' added/updated with {pts} points.")
     return ConversationHandler.END
 
-
 async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
@@ -301,45 +322,22 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /delete <challenge>")
         return
-    # join all parts into the full challenge name
     name = " ".join(context.args).strip()
     doc = flags.find_one({"_id": name})
     if not doc:
-        await update.message.reply_text(f"❗ Challenge '{name}' does not exist.")
+        await update.message_reply_text(f"❗ Challenge '{name}' does not exist.")
         return
     pts = doc.get("points", 0)
-    # remove submissions and deduct points
     for s in submissions.find({"challenge": name, "correct": True}):
         users.update_one({"_id": s["user_id"]}, {"$inc": {"points": -pts}})
     submissions.delete_many({"challenge": name})
     flags.delete_one({"_id": name})
     await update.message.reply_text(f"✅ Challenge '{name}' and all related data deleted.")
 
-
-async def viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.username):
-        await update.message.reply_text("❗ Unauthorized.")
-        return
-    rows = users.find().sort("points", -1)
-    text = "\n".join(f"{u['username']}: {u['points']}" for u in rows)
-    await update.message.reply_text("🏆 Users Points:\n" + text)
-
-
-async def viewusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.username):
-        await update.message.reply_text("❗ Unauthorized.")
-        return
-    rows = users.find()
-    text = "\n".join(f"{u['_id']}: {u['username']}" for u in rows)
-    await update.message.reply_text("👥 Registered Users:\n" + text)
-
-
 async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
-        await update.message.reply_text("❗ Unauthorized.")
+        await update.message_reply_text("❗ Unauthorized.")
         return
     rows = submissions.find().sort("timestamp", -1)
     lines = []
@@ -348,8 +346,7 @@ async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname = users.find_one({"_id": r["user_id"]})["username"]
         status = "Correct" if r["correct"] else "Wrong"
         lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
-    await update.message.reply_text("📝 Submissions:\n" + "\n".join(lines))
-
+    await update.message_reply_text("📝 Submissions:\n" + "\n".join(lines))
 
 # Startup: retry setting commands
 def init_commands(app):
@@ -364,7 +361,6 @@ def init_commands(app):
             BotCommand("addflag", "Add/update a challenge"),
             BotCommand("addnewadmins", "Grant admin rights"),
             BotCommand("delete", "Delete a challenge"),
-            BotCommand("viewpoints", "View all users points"),
             BotCommand("viewusers", "View registered users"),
             BotCommand("viewsubmissions", "View submissions log"),
             BotCommand("cancel", "Cancel current operation"),
@@ -394,25 +390,21 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("myviewpoints", my_viewpoints))
     app.add_handler(CommandHandler("viewchallenges", view_challenges))
-    app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_start))
+    app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\\d+:(nav|.+)"))
     app.add_handler(CommandHandler("addnewadmins", addnewadmins))
     app.add_handler(CommandHandler("delete", delete_challenge))
-    app.add_handler(CommandHandler("viewpoints", viewpoints))
-    app.add_handler(CommandHandler("viewusers", viewusers))
+    app.add_handler(CommandHandler("viewusers", viewusers_start))
+    app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\\d+:(nav|.+)"))
     app.add_handler(CommandHandler("viewsubmissions", viewsubmissions))
-
-    # Separate callback handlers
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
 
+    # Conversations
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler("submit", submit_start)],
         states={
-            SELECT_CHALLENGE: [
-                CallbackQueryHandler(select_challenge, pattern=r"^submit:.+")
-            ],
-            WAIT_FLAG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)
-            ],
+            SELECT_CHALLENGE: [CallbackQueryHandler(select_challenge, pattern=r"^submit:.+")],
+            WAIT_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
@@ -428,7 +420,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
     )
-
     app.add_handler(submit_conv)
     app.add_handler(addflag_conv)
 
@@ -449,7 +440,6 @@ def main():
         )
     else:
         app.run_polling()
-
 
 if __name__ == "__main__":
     main()
