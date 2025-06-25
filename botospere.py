@@ -87,6 +87,7 @@ def build_menu(items, page, prefix):
         nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{prefix}:{page+1}:nav"))
     if nav_buttons:
         keyboard.append(nav_buttons)
+    logger.info(f"Generated keyboard for {prefix}, page {page}, callback data: {nav_buttons}")
     return keyboard
 
 # Command handlers
@@ -231,6 +232,7 @@ async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No users on the leaderboard yet.")
         return
     context.user_data['leaderboard_list'] = all_users
+    logger.info(f"Stored leaderboard_list with {len(all_users)} users in user_data")
     items = [f"{rank+1}. @{html.escape(u['username'])} — {u['points']} pts" for rank, u in enumerate(all_users)]
     keyboard = build_menu(items, 0, 'lead')
     await update.message.reply_text(
@@ -243,19 +245,37 @@ async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data.split(':', 2)
+    logger.info(f"Leaderboard page callback triggered with data: {query.data}")
     if len(data) == 3 and data[2] == 'nav':
         page = int(data[1])
         all_users = context.user_data.get('leaderboard_list', [])
+        logger.info(f"Retrieved {len(all_users)} users from leaderboard_list for page {page}")
+        if not all_users:
+            logger.warning("leaderboard_list is empty in context.user_data")
+            await query.edit_message_text("Error: Leaderboard data not found. Please run /leaderboard again.")
+            return
         items = [f"{rank+1}. @{html.escape(u['username'])} — {u['points']} pts" for rank, u in enumerate(all_users)]
         start = page * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
         keyboard = build_menu(items, page, 'lead')
-        await query.edit_message_text(
-            "<b>🏅 Leaderboard 🏅</b>\n\n" + "\n".join(page_items),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        for attempt in range(3):
+            try:
+                await query.edit_message_text(
+                    "<b>🏅 Leaderboard 🏅</b>\n\n" + "\n".join(page_items),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                logger.info(f"Successfully updated leaderboard to page {page}")
+                return
+            except TimedOut:
+                logger.warning(f"edit_message_text timed out, retry {attempt+1}/3")
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.error(f"Error editing leaderboard message: {e}")
+                break
+        logger.error("Failed to edit leaderboard message after 3 attempts")
+        await query.edit_message_text("Error: Could not update leaderboard. Please try again.")
 
 # Registered users with pagination
 async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,6 +285,7 @@ async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     all_users = list(users.find())
     context.user_data['users_list'] = all_users
+    logger.info(f"Stored users_list with {len(all_users)} users in user_data")
     items = [f"{u['_id']}: {u['username']}" for u in all_users]
     keyboard = build_menu(items, 0, 'users')
     await update.message.reply_text("👥 Registered Users:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -274,10 +295,29 @@ async def viewusers_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     _, page_str, _ = query.data.split(':', 2)
     page = int(page_str)
+    logger.info(f"Viewusers page callback triggered with data: {query.data}")
     all_users = context.user_data.get('users_list', [])
+    logger.info(f"Retrieved {len(all_users)} users from users_list for page {page}")
+    if not all_users:
+        logger.warning("users_list is empty in context.user_data")
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+        await query.message.reply_text("Error: Users data not found. Please run /viewusers again.")
+        return
     items = [f"{u['_id']}: {u['username']}" for u in all_users]
     keyboard = build_menu(items, page, 'users')
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    for attempt in range(3):
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+            logger.info(f"Successfully updated viewusers to page {page}")
+            return
+        except TimedOut:
+            logger.warning(f"edit_message_reply_markup timed out, retry {attempt+1}/3")
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Error editing viewusers message: {e}")
+            break
+    logger.error("Failed to edit viewusers message after 3 attempts")
+    await query.message.reply_text("Error: Could not update users list. Please try again.")
 
 # Admin commands (addnewadmins, addflag, delete, viewsubmissions)
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -408,11 +448,11 @@ def main():
     app.add_handler(CommandHandler("myviewpoints", my_viewpoints))
     app.add_handler(CommandHandler("viewchallenges", view_challenges))
     app.add_handler(CommandHandler("leaderboard", leaderboard_start))
-    app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\\d+:nav$"))
+    app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\d+:nav$"))
     app.add_handler(CommandHandler("addnewadmins", addnewadmins))
     app.add_handler(CommandHandler("delete", delete_challenge))
     app.add_handler(CommandHandler("viewusers", viewusers_start))
-    app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\\d+:(nav|.+)"))
+    app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\d+:(nav|.+)"))
     app.add_handler(CommandHandler("viewsubmissions", viewsubmissions))
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
 
@@ -452,7 +492,7 @@ def main():
     async def error_handler(update, context):
         logger.error("❌ Exception in handler:", exc_info=context.error)
 
-    app.add_error_handler(error_handler)  # Fixed line
+    app.add_error_handler(error_handler)
 
     # Start webhook or polling
     if WEBHOOK_URL:
