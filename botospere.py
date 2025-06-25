@@ -121,7 +121,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/addflag – (Admin) Add/update a challenge\n"
         "/addnewadmins <username> – (Admin) Grant admin rights\n"
         "/delete <challenge> – (Admin) Delete a challenge\n"
-        "/viewpoints – (Admin) View all users' points\n"
         "/viewusers – (Admin) View registered users\n"
         "/viewsubmissions – (Admin) View submissions log\n"
         "/cancel – Cancel current operation"
@@ -242,11 +241,12 @@ async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Registered users with pagination
 async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.username):
+    user = update.effective_user
+    if not is_admin(user.username):
         await update.message.reply_text("❗ Unauthorized.")
         return
     all_users = list(users.find())
-    context.user_data['users_list'] = all_users
+    context.user_data['users_list']=all_users
     items = [f"{u['_id']}: {u['username']}" for u in all_users]
     keyboard = build_menu(items, 0, 'users')
     await update.message.reply_text("👥 Registered Users:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -261,7 +261,7 @@ async def viewusers_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = build_menu(items, page, 'users')
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Admin commands (addnewadmins, addflag, delete, viewpoints, viewusers, viewsubmissions)
+# Admin commands (addnewadmins, addflag, delete, viewsubmissions)
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
@@ -320,7 +320,7 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❗ Unauthorized.")
         return
     if not context.args:
-        await update.message_reply_text("Usage: /delete <challenge>")
+        await update.message.reply_text("Usage: /delete <challenge>")
         return
     name = " ".join(context.args).strip()
     doc = flags.find_one({"_id": name})
@@ -332,16 +332,7 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users.update_one({"_id": s["user_id"]}, {"$inc": {"points": -pts}})
     submissions.delete_many({"challenge": name})
     flags.delete_one({"_id": name})
-    await update.message_reply_text(f"✅ Challenge '{name}' and all related data deleted.")
-
-async def viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.username):
-        await update.message_reply_text("❗ Unauthorized.")
-        return
-    rows = users.find().sort("points", -1)
-    text = "\n".join(f"{u['username']}: {u['points']}" for u in rows)
-    await update.message_reply_text("🏆 Users Points:\n" + text)
+    await update.message.reply_text(f"✅ Challenge '{name}' and all related data deleted.")
 
 async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -370,7 +361,6 @@ def init_commands(app):
             BotCommand("addflag", "Add/update a challenge"),
             BotCommand("addnewadmins", "Grant admin rights"),
             BotCommand("delete", "Delete a challenge"),
-            BotCommand("viewpoints", "View all users points"),
             BotCommand("viewusers", "View registered users"),
             BotCommand("viewsubmissions", "View submissions log"),
             BotCommand("cancel", "Cancel current operation"),
@@ -404,21 +394,17 @@ def main():
     app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\\d+:(nav|.+)"))
     app.add_handler(CommandHandler("addnewadmins", addnewadmins))
     app.add_handler(CommandHandler("delete", delete_challenge))
-    app.add_handler(CommandHandler("viewpoints", viewpoints))
     app.add_handler(CommandHandler("viewusers", viewusers_start))
     app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\\d+:(nav|.+)"))
     app.add_handler(CommandHandler("viewsubmissions", viewsubmissions))
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
 
+    # Conversations
     submit_conv = ConversationHandler(
         entry_points=[CommandHandler("submit", submit_start)],
         states={
-            SELECT_CHALLENGE: [
-                CallbackQueryHandler(select_challenge, pattern=r"^submit:.+")
-            ],
-            WAIT_FLAG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)
-            ],
+            SELECT_CHALLENGE: [CallbackQueryHandler(select_challenge, pattern=r"^submit:.+")],
+            WAIT_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
