@@ -16,7 +16,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from telegram.error import TimedOut
+from telegram.error import TimedOut, BadRequest
 
 # Optional dotenv support
 try:
@@ -61,7 +61,8 @@ def is_admin(username: str) -> bool:
     return username == ADMIN_USERNAME or bool(admins.find_one({"username": username}))
 
 async def add_user_if_not_exists(user_id: int, username: str):
-    # Update username every time, set points only on insert
+    if username is None:
+        username = "Unknown"
     users.update_one(
         {"_id": user_id},
         {"$set": {"username": username}, "$setOnInsert": {"points": 0}},
@@ -80,7 +81,6 @@ def build_menu(items, page, prefix, items_per_page=ITEMS_PER_PAGE):
     page_items = items[start:end]
     keyboard = []
     for item in page_items:
-        # Use a dummy callback for items to prevent unintended navigation
         keyboard.append([InlineKeyboardButton(item, callback_data=f"{prefix}:noop")])
     nav_buttons = []
     if page > 0:
@@ -101,7 +101,7 @@ def build_submissions_message(submissions_list, page):
     for r in page_submissions:
         ts = r.get("timestamp", r["_id"].generation_time).strftime("%Y-%m-%d %H:%M:%S")
         user_doc = users.find_one({"_id": r["user_id"]})
-        uname = user_doc.get("username", "Unknown") if user_doc else "Unknown"
+        uname = user_doc.get("username") or "Unknown"
         status = "Correct" if r["correct"] else "Wrong"
         lines.append(f"{ts} - @{uname} - {r['challenge']} - {r['submitted_flag']} - {status}")
     text = "📝 Submissions:\n" + "\n".join(lines)
@@ -152,6 +152,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/delete <challenge> – (Admin) Delete a challenge\n"
         "/viewusers – (Admin) View registered users\n"
         "/viewsubmissions – (Admin) View submissions log\n"
+        "/bloods – View all challenges & their solvers\n"
         "/cancel – Cancel current operation"
     )
 
@@ -223,7 +224,7 @@ async def receive_flag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     if correct:
         users.update_one(
-            {"_id": user.id},  # Fixed the unterminated string literal here
+            {"_id": user.id},
             {
                 "$inc": {"points": pts},
                 "$set": {"last_correct_submission": datetime.utcnow()}
@@ -249,24 +250,23 @@ async def my_viewpoints(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     doc = users.find_one({"_id": user.id}) or {}
     pts = doc.get("points", 0)
-    # Handle case where username is None
     if user.username:
         name = f"@{user.username}"
     else:
         name = user.first_name or "User"
     await update.message.reply_text(f"👤 {name}, you have {pts} points.")
 
-# Leaderboard with pagination
+# Leaderboard with pagination (fixed username escaping)
 async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sort by points descending, then by last_correct_submission ascending
     all_users = list(users.find().sort([("points", -1), ("last_correct_submission", 1)]))
     if not all_users:
         await update.message.reply_text("No users on the leaderboard yet.")
         return
     context.user_data['leaderboard_list'] = all_users
-    logger.info(f"Stored leaderboard_list with {len(all_users)} users in user_data")
-    # Use get() to handle missing or None usernames
-    items = [f"{rank+1}. @{html.escape(u.get('username', 'Unknown'))} — {u['points']} pts" for rank, u in enumerate(all_users)]
+    items = [
+        f"{i+1}. @{html.escape(u.get('username') or 'Unknown')} — {u['points']} pts"
+        for i, u in enumerate(all_users)
+    ]
     keyboard = build_menu(items, 0, 'lead')
     await update.message.reply_text(
         "<b>🏅 Leaderboard 🏅</b>\n\n" + "\n".join(items[0:ITEMS_PER_PAGE]),
@@ -277,18 +277,17 @@ async def leaderboard_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data.split(':', 2)
-    logger.info(f"Leaderboard page callback triggered with data: {query.data}")
+    data = query.data.split(":", 2)
     if len(data) == 3 and data[2] == 'nav':
         page = int(data[1])
         all_users = context.user_data.get('leaderboard_list', [])
-        logger.info(f"Retrieved {len(all_users)} users from leaderboard_list for page {page}")
         if not all_users:
-            logger.warning("leaderboard_list is empty in context.user_data")
             await query.edit_message_text("Error: Leaderboard data not found. Please run /leaderboard again.")
             return
-        # Use get() to handle missing or None usernames
-        items = [f"{rank+1}. @{html.escape(u.get('username', 'Unknown'))} — {u['points']} pts" for rank, u in enumerate(all_users)]
+        items = [
+            f"{i+1}. @{html.escape(u.get('username') or 'Unknown')} — {u['points']} pts"
+            for i, u in enumerate(all_users)
+        ]
         start = page * ITEMS_PER_PAGE
         end = start + ITEMS_PER_PAGE
         page_items = items[start:end]
@@ -300,15 +299,13 @@ async def leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
-                logger.info(f"Successfully updated leaderboard to page {page}")
                 return
             except TimedOut:
-                logger.warning(f"edit_message_text timed out, retry {attempt+1}/3")
                 await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Error editing leaderboard message: {e}")
-                break
-        logger.error("Failed to edit leaderboard message after 3 attempts")
+            except BadRequest as e:
+                if "MESSAGE_ID_INVALID" in str(e):
+                    await query.message.reply_text("Leaderboard expired, please run /leaderboard again.")
+                    return
         await query.edit_message_text("Error: Could not update leaderboard. Please try again.")
 
 # Registered users with pagination
@@ -319,43 +316,46 @@ async def viewusers_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     all_users = list(users.find())
     context.user_data['users_list'] = all_users
-    logger.info(f"Stored users_list with {len(all_users)} users in user_data")
-    # Use get() to handle missing or None usernames
-    items = [f"{u['_id']}: {u.get('username', 'No username')}" for u in all_users]
+    items = [f"{u['_id']}: {u.get('username') or 'No username'}" for u in all_users]
     keyboard = build_menu(items, 0, 'users')
     await update.message.reply_text("👥 Registered Users:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def viewusers_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, page_str, _ = query.data.split(':', 2)
-    page = int(page_str)
-    logger.info(f"Viewusers page callback triggered with data: {query.data}")
-    all_users = context.user_data.get('users_list', [])
-    logger.info(f"Retrieved {len(all_users)} users from users_list for page {page}")
-    if not all_users:
-        logger.warning("users_list is empty in context.user_data")
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
-        await query.message.reply_text("Error: Users data not found. Please run /viewusers again.")
+    _, page_str, kind = query.data.split(":", 2)
+    if kind != 'nav':
         return
-    # Use get() to handle missing or None usernames
-    items = [f"{u['_id']}: {u.get('username', 'No username')}" for u in all_users]
+    page = int(page_str)
+    items = [f"{u['_id']}: {u.get('username') or 'No username'}" for u in context.user_data.get('users_list', [])]
     keyboard = build_menu(items, page, 'users')
-    for attempt in range(3):
-        try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
-            logger.info(f"Successfully updated viewusers to page {page}")
-            return
-        except TimedOut:
-            logger.warning(f"edit_message_reply_markup timed out, retry {attempt+1}/3")
-            await asyncio.sleep(2)
-        except Exception as e:
-            logger.error(f"Error editing viewusers message: {e}")
-            break
-    logger.error("Failed to edit viewusers message after 3 attempts")
-    await query.message.reply_text("Error: Could not update users list. Please try again.")
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Admin commands (addnewadmins, addflag, delete, viewsubmissions)
+# Admin submission log
+async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.username):
+        await update.message.reply_text("❗ Unauthorized.")
+        return
+    all_submissions = list(submissions.find().sort("timestamp", -1))
+    context.user_data['submissions_list'] = all_submissions
+    if not all_submissions:
+        await update.message.reply_text("No submissions yet.")
+        return
+    text, keyboard = build_submissions_message(all_submissions, 0)
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def submissions_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, page_str, kind = query.data.split(":", 2)
+    if kind != 'nav':
+        return
+    page = int(page_str)
+    text, keyboard = build_submissions_message(context.user_data.get('submissions_list', []), page)
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Admin commands (addnewadmins, addflag, delete)
 async def addnewadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not is_admin(user.username):
@@ -428,39 +428,82 @@ async def delete_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flags.delete_one({"_id": name})
     await update.message.reply_text(f"✅ Challenge '{name}' and all related data deleted.")
 
-# Updated viewsubmissions with pagination
-async def viewsubmissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.username):
-        await update.message.reply_text("❗ Unauthorized.")
-        return
-    
-    all_submissions = list(submissions.find().sort("timestamp", -1))
-    context.user_data['submissions_list'] = all_submissions
-    
-    if not all_submissions:
-        await update.message.reply_text("No submissions yet.")
-        return
-    
-    text, keyboard = build_submissions_message(all_submissions, 0)
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+# ----- /bloods command -----
+async def bloods_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pipeline = [
+        {"$lookup": {
+            "from": "submissions",
+            "let": {"chal": "$_id"},
+            "pipeline": [
+                {"$match": {"$expr": {
+                    "$and": [
+                        {"$eq": ["$challenge", "$$chal"]},
+                        {"$eq": ["$correct", True]}
+                    ]
+                }}},
+                {"$group": {"_id": None, "solvers": {"$addToSet": "$user_id"}}},
+                {"$project": {"_id": 0, "count": {"$size": "$solvers"}}}
+            ],
+            "as": "info"
+        }},
+        {"$addFields": {"solver_count": {"$ifNull": [{"$arrayElemAt": ["$info.count", 0]}, 0]}}},
+        {"$project": {"_id": 1, "solver_count": 1}}
+    ]
+    all_chals = list(flags.aggregate(pipeline))
+    all_chals.sort(key=lambda x: x["_id"].lower())
+    context.user_data["bloods_list"] = all_chals
+    await _bloods_show_page(update, context, 0)
 
-# Callback handler for submissions pagination
-async def submissions_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data.split(':', 2)
-    if len(data) == 3 and data[0] == 'submissions' and data[2] == 'nav':
-        page = int(data[1])
-        all_submissions = context.user_data.get('submissions_list', [])
-        
-        if not all_submissions:
-            await query.edit_message_text("Error: Submissions data not found. Please run /viewsubmissions again.")
-            return
-        
-        text, keyboard = build_submissions_message(all_submissions, page)
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+async def _bloods_show_page(update, context, page: int):
+    all_chals = context.user_data.get("bloods_list", [])
+    if not all_chals:
+        return await update.message.reply_text("No challenges available.")
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    kb = []
+    for c in all_chals[start:end]:
+        kb.append([
+            InlineKeyboardButton(
+                f"{c['_id']} ({c['solver_count']} solvers)",
+                callback_data=f"bloods_show:{c['_id']}"
+            )
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"bloods_page:{page-1}"))
+    if end < len(all_chals):
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"bloods_page:{page+1}"))
+    if nav:
+        kb.append(nav)
+    await update.message.reply_text("📋 All Challenges:", reply_markup=InlineKeyboardMarkup(kb))
+
+async def bloods_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    page = int(q.data.split(":", 1)[1])
+    await _bloods_show_page(update, context, page)
+
+async def bloods_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chal = q.data.split(":", 1)[1]
+    subs = list(submissions.find({"challenge": chal, "correct": True}).sort("timestamp", 1))
+    if not subs:
+        return await q.edit_message_text(f"No solvers yet for {chal}.")
+    seen, solvers = set(), []
+    for s in subs:
+        udoc = users.find_one({"_id": s["user_id"]}) or {}
+        name = udoc.get("username") or udoc.get("first_name") or "Unknown"
+        if name in seen:
+            continue
+        seen.add(name)
+        solvers.append(name)
+    lines = [f"Solvers for {chal}"]
+    if solvers:
+        lines.append(f"@{solvers[0]} — firstblood")
+        for other in solvers[1:]:
+            lines.append(f"@{other}")
+    await q.edit_message_text("\n".join(lines))
 
 # Startup: retry setting commands
 def init_commands(app):
@@ -472,6 +515,7 @@ def init_commands(app):
             BotCommand("myviewpoints", "View your points"),
             BotCommand("viewchallenges", "List all challenges"),
             BotCommand("leaderboard", "View top users"),
+            BotCommand("bloods", "View all challenges & their solvers"),
             BotCommand("addflag", "Add/update a challenge"),
             BotCommand("addnewadmins", "Grant admin rights"),
             BotCommand("delete", "Delete a challenge"),
@@ -487,7 +531,6 @@ def init_commands(app):
                 logger.warning(f"set_my_commands timed out, retry {attempt+1}/3")
                 await asyncio.sleep(2)
         logger.error("Failed to set bot commands after 3 attempts")
-
     return on_startup
 
 def main():
@@ -503,47 +546,33 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("myviewpoints", my_viewpoints))
     app.add_handler(CommandHandler("viewchallenges", view_challenges))
+    app.add_handler(CommandHandler("submit", submit_start))
+    app.add_handler(CallbackQueryHandler(select_challenge, pattern=r"^submit:.+"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("leaderboard", leaderboard_start))
     app.add_handler(CallbackQueryHandler(leaderboard_page, pattern=r"^lead:\d+:nav$"))
-    app.add_handler(CommandHandler("addnewadmins", addnewadmins))
-    app.add_handler(CommandHandler("delete", delete_challenge))
     app.add_handler(CommandHandler("viewusers", viewusers_start))
     app.add_handler(CallbackQueryHandler(viewusers_page, pattern=r"^users:\d+:(nav|.+)"))
     app.add_handler(CommandHandler("viewsubmissions", viewsubmissions))
     app.add_handler(CallbackQueryHandler(submissions_page, pattern=r"^submissions:\d+:nav$"))
+    app.add_handler(CommandHandler("bloods", bloods_start))
+    app.add_handler(CallbackQueryHandler(bloods_page,   pattern=r"^bloods_page:\d+$"))
+    app.add_handler(CallbackQueryHandler(bloods_show,   pattern=r"^bloods_show:.+"))
     app.add_handler(CallbackQueryHandler(details_challenge, pattern=r"^detail:.+"))
-
-    # Conversations спроб
-    submit_conv = ConversationHandler(
-        entry_points=[CommandHandler("submit", submit_start)],
-        states={
-            SELECT_CHALLENGE: [
-                CallbackQueryHandler(select_challenge, pattern=r"^submit:.+"),
-                CommandHandler("submit", submit_start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.message.reply_text("Please select a challenge from the buttons above."))
-            ],
-            WAIT_FLAG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_flag),
-                CommandHandler("submit", submit_start)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_user=True,
-        allow_reentry=True,
-    )
-    addflag_conv = ConversationHandler(
+    app.add_handler(CommandHandler("addnewadmins", addnewadmins))
+    app.add_handler(CommandHandler("delete", delete_challenge))
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("addflag", addflag_start)],
         states={
-            AF_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_name)],
-            AF_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_points)],
-            AF_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_link)],
-            AF_FLAG: [MessageHandler(filters.TEXT & ~filters.COMMAND, af_flag)],
+            AF_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, af_name)],
+            AF_POINTS:[MessageHandler(filters.TEXT & ~filters.COMMAND, af_points)],
+            AF_LINK:  [MessageHandler(filters.TEXT & ~filters.COMMAND, af_link)],
+            AF_FLAG:  [MessageHandler(filters.TEXT & ~filters.COMMAND, af_flag)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_user=True,
-    )
-    app.add_handler(submit_conv)
-    app.add_handler(addflag_conv)
+    ))
 
     # Error handler
     async def error_handler(update, context):
